@@ -62,37 +62,24 @@ Configure repo URL via:
 - Info.plist key: `URLSafeClipboardParsedRulesURL`
 - Or env override: `URLSAFECLIPBOARD_RULES_URL`
 
-## Build App
-
-```bash
-./scripts/build-app.sh
-```
-
-Output:
-- `dist/URLSafeClipboard.app`
-
-Notes:
-- Uses `assets/logo.png` to generate and embed `AppIcon.icns`
-- Bundles `assets/` into app resources
-
 ## Build DMG Installer
 
 ```bash
-./build-dmg.sh
+./scripts/build-dmg.sh
 ```
 
 Output:
-- `dist/URLSafeClipboard.dmg`
+- `./URLSafeClipboard.dmg`
 
 Installer behavior:
 - Drag-and-drop layout (`URLSafeClipboard.app` + `Applications` link)
-- Includes background image from `assets/background.tiff` (Finder layout step is best-effort)
-- Ad-hoc signs app and DMG by default
+- Includes background image from `assets/background.tiff`
+- Builds app + DMG in one script
 
 Optional signing identity:
 
 ```bash
-SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build-dmg.sh
+SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/build-dmg.sh
 ```
 
 ## Run In Development
