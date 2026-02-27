@@ -8,6 +8,8 @@
     <string>URLSafeClipboard</string>
     <key>CFBundleIdentifier</key>
     <string>com.local.URLSafeClipboard</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -24,5 +26,7 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>URLSafeClipboardParsedRulesURL</key>
+    <string>https://raw.githubusercontent.com/jayf0x/url-safe-clipboard/refs/heads/main/assets/parsedRules.json</string>
 </dict>
 </plist>

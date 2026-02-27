@@ -1,111 +1,107 @@
 # URLSafeClipboard
 
-URLSafeClipboard is a macOS menu bar app (Swift/SwiftUI) that watches the clipboard and neutralizes tracking parameters from copied URLs.
+URLSafeClipboard is a macOS menu bar app (Swift/SwiftUI) that neutralizes tracking parameters in copied URLs.
 
-It uses:
-- Remote TXT rules from:
-  - `https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/privacy-removeparam.txt`
-- Remote JSON rules from:
-  - `https://gitlab.com/ClearURLs/rules/-/raw/master/data.min.json`
-- Local `assets/` as fallback backup sources when remote fetch/cached copies are unavailable.
+Privacy model:
+- Clipboard content is never written to disk.
+- Duplicate detection uses an in-memory SHA-256 hash only.
+- Only rule files are cached.
 
-Clipboard content is kept in memory only. The app never writes clipboard history or raw clipboard URLs to disk.
+## Rule Model
 
-## Features
+The app now consumes a single parsed file:
+- `assets/parsedRules.json`
 
-- Menu bar app with no Dock icon (`LSUIElement`)
-- Active/Paused toggle and Quit menu actions
-- Replace Mode toggle (`r`) to set matched params to `null` instead of removing them
-- Manual `Refetch rules` action in menu
-- Status icon changes based on Active vs Paused
-- Clipboard polling every 200ms, fully stopped while paused
-- Debounced processing to avoid rewrite loops when copy events happen quickly
-- Clipboard deduplication via in-memory SHA-256 hash (no raw URL persistence for duplicate checks)
-- Remote rules fetch behavior:
-  - Automatically refetches on launch when parsed cache is missing
-  - Manual refetch from menu at any time
-  - Fallback order: remote fetch -> cached raw rules -> bundled `assets/`
-- URL cleaning with:
-  - Global query parameter matching from TXT rules
-  - Domain/provider-specific matching from JSON rules
-  - Exact and regex query parameter matching
-  - Two actions for matched params:
-    - Remove mode (default): drop matched params
-    - Replace mode: force matched params to `name=null`
-- Optional parsed-rule disk cache (no clipboard content), stored at:
-  - `~/Library/Caches/URLSafeClipboard/parsedRules.json`
-- Optional cached raw remote rules:
-  - `~/Library/Caches/URLSafeClipboard/privacy-removeparam.txt`
-  - `~/Library/Caches/URLSafeClipboard/data.min.json`
-- Optional error log:
-  - `~/Library/Caches/URLSafeClipboard/error.txt`
+Schema:
+- `generalExact`: global exact query-parameter names
+- `generalRegex`: global regex query-parameter patterns
+- `providers[]`:
+  - `name`
+  - `urlPattern` (regex to match URL)
+  - `exactParams`
+  - `regexParams`
 
-## Project Structure
+## Update Flow
 
-```text
-.
-├── assets
-│   ├── data.min.json
-│   └── privacy-removeparam.txt
-├── scripts
-│   └── build-app.sh
-├── Sources
-│   └── URLSafeClipboard
-│       ├── AppDelegate.swift
-│       ├── AppState.swift
-│       ├── ClipboardWatcher.swift
-│       ├── URLCleaner.swift
-│       └── URLSafeClipboardApp.swift
-├── Package.swift
-└── URLSafeClipboard-Info.plist
+### 1. Generate Parsed Rules (`./create-rules`)
+
+`./create-rules` fetches upstream rule sources and writes `assets/parsedRules.json`.
+
+Upstream sources:
+- TXT: `https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/privacy-removeparam.txt`
+- JSON: `https://gitlab.com/ClearURLs/rules/-/raw/master/data.min.json`
+
+Usage:
+
+```bash
+./create-rules
 ```
 
-## Requirements
+Offline/local fallback generation:
 
-- macOS 13+
-- Xcode Command Line Tools installed (`xcode-select --install`)
+```bash
+./create-rules --offline
+```
 
-## Build And Run (Development)
+### 2. App Startup Loading
 
-From the repository root:
+At startup, app rule loading order is:
+1. `~/Library/Caches/URLSafeClipboard/parsedRules.json`
+2. Bundled `assets/parsedRules.json`
+
+If cache is missing, startup triggers an async repo refetch attempt.
+
+### 3. Refetch Rules
+
+Menu action: `Refetch rules`
+- Fetches only one file from your repo (`parsedRules.json`)
+- Updates in-memory rules and cache on success
+- Falls back to cache/bundled rules on failure
+
+Configure repo URL via:
+- Info.plist key: `URLSafeClipboardParsedRulesURL`
+- Or env override: `URLSAFECLIPBOARD_RULES_URL`
+
+## Build App
+
+```bash
+./scripts/build-app.sh
+```
+
+Output:
+- `dist/URLSafeClipboard.app`
+
+Notes:
+- Uses `assets/logo.png` to generate and embed `AppIcon.icns`
+- Bundles `assets/` into app resources
+
+## Build DMG Installer
+
+```bash
+./build-dmg.sh
+```
+
+Output:
+- `dist/URLSafeClipboard.dmg`
+
+Installer behavior:
+- Drag-and-drop layout (`URLSafeClipboard.app` + `Applications` link)
+- Includes background image from `assets/background.tiff` (Finder layout step is best-effort)
+- Ad-hoc signs app and DMG by default
+
+Optional signing identity:
+
+```bash
+SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build-dmg.sh
+```
+
+## Run In Development
 
 ```bash
 swift run URLSafeClipboard
 ```
 
-## Build Drag-And-Drop `.app`
+## Cache Files
 
-```bash
-chmod +x scripts/build-app.sh
-./scripts/build-app.sh
-```
-
-Output:
-
-```text
-dist/URLSafeClipboard.app
-```
-
-You can drag this app into `Applications` and launch it.
-
-## Optional xcodebuild Build (Package)
-
-```bash
-xcodebuild -scheme URLSafeClipboard -configuration Release -destination "platform=macOS" build
-```
-
-## Behavior Notes
-
-- Non-URL clipboard strings are ignored.
-- Malformed URLs are ignored safely.
-- Only `http` and `https` URLs are cleaned.
-- When paused, clipboard polling is fully stopped.
-- Last copied URL is not displayed in the UI.
-- Duplicate detection uses an in-memory hash only.
-- Rules are loaded into memory; cache is only for parsed rules and is overwritten on source updates.
-
-## Future Extension Hooks
-
-- AMP URL unwrapping
-- Redirect URL extraction/decoding
-- Expanded regex transformations for path-level cleanup
+- Rules cache: `~/Library/Caches/URLSafeClipboard/parsedRules.json`
+- Optional error log: `~/Library/Caches/URLSafeClipboard/error.txt`

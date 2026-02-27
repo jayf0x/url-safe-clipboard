@@ -80,16 +80,15 @@ final class URLCleaner {
         guard shouldRefetchOnLaunch else { return nil }
         shouldRefetchOnLaunch = false
 
-        let result = await loader.refreshRules()
+        let result = await loader.refreshRulesFromRepo()
         if let refreshedRules = result.rules {
             rules = refreshedRules
         }
-
         return result.status
     }
 
     func refetchRulesManually() async -> RuleRefreshStatus {
-        let result = await loader.refreshRules()
+        let result = await loader.refreshRulesFromRepo()
         if let refreshedRules = result.rules {
             rules = refreshedRules
         }
@@ -169,260 +168,145 @@ private struct RefreshResult {
     let status: RuleRefreshStatus
 }
 
-private struct SourceSelection {
-    let txt: String?
-    let jsonData: Data?
-    let usedRemoteTXT: Bool
-    let usedRemoteJSON: Bool
-    let errors: [String]
-}
+private struct ParsedRulesPayload: Codable {
+    struct ProviderEntry: Codable {
+        let name: String
+        let urlPattern: String?
+        let exactParams: [String]
+        let regexParams: [String]
+    }
 
-private struct RemoteTextFetchResult {
-    let text: String?
-    let error: String?
-}
-
-private struct RemoteDataFetchResult {
-    let data: Data?
-    let error: String?
+    let generalExact: [String]
+    let generalRegex: [String]
+    let providers: [ProviderEntry]
 }
 
 private final class RulesLoader {
     private let fileManager = FileManager.default
-    private let removeParamPrefix = "$removeparam="
-    private let regexMetaCharacters = CharacterSet(charactersIn: "\\^$.*+?()[]{}|")
-
-    private let txtURL = URL(string: "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/privacy-removeparam.txt")!
-    private let jsonURL = URL(string: "https://gitlab.com/ClearURLs/rules/-/raw/master/data.min.json")!
+    private let defaultRepoURL = "https://raw.githubusercontent.com/jayf0x/url-safe-clipboard/refs/heads/main/assets/parsedRules.json"
 
     func loadBootstrapRules() -> BootstrapLoadResult {
-        if let cached = loadCachedRules() {
-            return BootstrapLoadResult(rules: cached, loadedFromCache: true)
+        if let cachedData = loadCachedParsedRulesData(),
+           let cachedRules = parseRules(from: cachedData) {
+            return BootstrapLoadResult(rules: cachedRules, loadedFromCache: true)
         }
 
-        if let parsedFromCachedRaw = parseRules(txt: cachedTXTString(), jsonData: cachedJSONData()) {
-            saveRulesToCache(parsedFromCachedRaw)
-            return BootstrapLoadResult(rules: parsedFromCachedRaw, loadedFromCache: true)
-        }
-
-        if let parsedFromAssets = parseRules(txt: assetTXTString(), jsonData: assetJSONData()) {
-            saveRulesToCache(parsedFromAssets)
-            return BootstrapLoadResult(rules: parsedFromAssets, loadedFromCache: false)
+        if let bundledData = loadBundledParsedRulesData(),
+           let bundledRules = parseRules(from: bundledData) {
+            saveParsedRulesDataToCache(bundledData)
+            return BootstrapLoadResult(rules: bundledRules, loadedFromCache: false)
         }
 
         return BootstrapLoadResult(rules: .empty, loadedFromCache: false)
     }
 
-    func refreshRules() async -> RefreshResult {
-        let selection = await fetchRuleSourcesWithFallback()
+    func refreshRulesFromRepo() async -> RefreshResult {
+        guard let repoURL = repoParsedRulesURL() else {
+            let message = "Refetch failed: missing repo parsedRules URL."
+            logErrors([message])
+            return refreshFromFallback(messagePrefix: message)
+        }
 
-        let parsed: URLCleaningRules
-        let usedRemoteTXT: Bool
-        let usedRemoteJSON: Bool
-        var combinedErrors = selection.errors
+        do {
+            let (data, response) = try await URLSession.shared.data(from: repoURL)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                let message = "Refetch failed: repo returned non-2xx response."
+                logErrors([message])
+                return refreshFromFallback(messagePrefix: message)
+            }
 
-        if let selectedParsed = parseRules(txt: selection.txt, jsonData: selection.jsonData) {
-            parsed = selectedParsed
-            usedRemoteTXT = selection.usedRemoteTXT
-            usedRemoteJSON = selection.usedRemoteJSON
-        } else if let fallbackParsed = parseRules(txt: cachedTXTString() ?? assetTXTString(), jsonData: cachedJSONData() ?? assetJSONData()) {
-            parsed = fallbackParsed
-            usedRemoteTXT = false
-            usedRemoteJSON = false
-            combinedErrors.append("Remote parse failed; used cached/assets fallback.")
-        } else {
-            let failureMessage = "Rule refresh failed; using existing in-memory rules."
-            logErrors(combinedErrors + [failureMessage])
+            guard let parsed = parseRules(from: data) else {
+                let message = "Refetch failed: invalid parsedRules.json format from repo."
+                logErrors([message])
+                return refreshFromFallback(messagePrefix: message)
+            }
+
+            saveParsedRulesDataToCache(data)
             return RefreshResult(
-                rules: nil,
+                rules: parsed,
                 status: RuleRefreshStatus(
-                    message: failureMessage,
-                    usedRemoteTXT: selection.usedRemoteTXT,
-                    usedRemoteJSON: selection.usedRemoteJSON,
+                    message: "Rules updated from repo parsedRules.json.",
+                    usedRemoteTXT: true,
+                    usedRemoteJSON: true,
+                    hadErrors: false
+                )
+            )
+        } catch {
+            let message = "Refetch failed: \(error.localizedDescription)"
+            logErrors([message])
+            return refreshFromFallback(messagePrefix: message)
+        }
+    }
+
+    private func refreshFromFallback(messagePrefix: String) -> RefreshResult {
+        if let cachedData = loadCachedParsedRulesData(),
+           let cachedRules = parseRules(from: cachedData) {
+            return RefreshResult(
+                rules: cachedRules,
+                status: RuleRefreshStatus(
+                    message: "\(messagePrefix) Using cached rules.",
+                    usedRemoteTXT: false,
+                    usedRemoteJSON: false,
                     hadErrors: true
                 )
             )
         }
 
-        saveRulesToCache(parsed)
-        if !combinedErrors.isEmpty {
-            logErrors(combinedErrors)
-        }
-
-        let message: String
-        if usedRemoteTXT && usedRemoteJSON {
-            message = "Rules updated from remote sources."
-        } else if usedRemoteTXT || usedRemoteJSON {
-            message = "Rules refreshed with partial fallback."
-        } else {
-            message = "Rules refreshed from cache/assets fallback."
-        }
-
-        return RefreshResult(
-            rules: parsed,
-            status: RuleRefreshStatus(
-                message: message,
-                usedRemoteTXT: usedRemoteTXT,
-                usedRemoteJSON: usedRemoteJSON,
-                hadErrors: !combinedErrors.isEmpty
-            )
-        )
-    }
-
-    private func fetchRuleSourcesWithFallback() async -> SourceSelection {
-        async let remoteTXT = fetchRemoteText(from: txtURL)
-        async let remoteJSON = fetchRemoteData(from: jsonURL)
-
-        let txtResult = await remoteTXT
-        let jsonResult = await remoteJSON
-
-        var errors: [String] = []
-
-        var txt = txtResult.text
-        var usedRemoteTXT = txt != nil
-        if txt == nil {
-            if let error = txtResult.error {
-                errors.append(error)
-            }
-            txt = cachedTXTString() ?? assetTXTString()
-            usedRemoteTXT = false
-        } else if let text = txt {
-            saveRemoteTXTCache(text)
-        }
-
-        var jsonData = jsonResult.data
-        var usedRemoteJSON = jsonData != nil
-        if jsonData == nil {
-            if let error = jsonResult.error {
-                errors.append(error)
-            }
-            jsonData = cachedJSONData() ?? assetJSONData()
-            usedRemoteJSON = false
-        } else if let data = jsonData {
-            saveRemoteJSONCache(data)
-        }
-
-        return SourceSelection(
-            txt: txt,
-            jsonData: jsonData,
-            usedRemoteTXT: usedRemoteTXT,
-            usedRemoteJSON: usedRemoteJSON,
-            errors: errors
-        )
-    }
-
-    private func fetchRemoteText(from url: URL) async -> RemoteTextFetchResult {
-        do {
-            let (data, response) = try await URLSession.shared.data(from: url)
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                return RemoteTextFetchResult(text: nil, error: "TXT fetch returned non-2xx status.")
-            }
-            guard let text = String(data: data, encoding: .utf8), !text.isEmpty else {
-                return RemoteTextFetchResult(text: nil, error: "TXT fetch returned invalid UTF-8 or empty data.")
-            }
-            return RemoteTextFetchResult(text: text, error: nil)
-        } catch {
-            return RemoteTextFetchResult(text: nil, error: "TXT fetch failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func fetchRemoteData(from url: URL) async -> RemoteDataFetchResult {
-        do {
-            let (data, response) = try await URLSession.shared.data(from: url)
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                return RemoteDataFetchResult(data: nil, error: "JSON fetch returned non-2xx status.")
-            }
-            guard !data.isEmpty else {
-                return RemoteDataFetchResult(data: nil, error: "JSON fetch returned empty data.")
-            }
-            return RemoteDataFetchResult(data: data, error: nil)
-        } catch {
-            return RemoteDataFetchResult(data: nil, error: "JSON fetch failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func parseRules(txt: String?, jsonData: Data?) -> URLCleaningRules? {
-        guard let txt, let jsonData else { return nil }
-
-        let general = parseGeneralRules(fromContent: txt)
-        let providers = parseProviderRules(fromData: jsonData)
-
-        return URLCleaningRules(
-            generalExact: general.exact,
-            generalRegex: compileParameterRegexes(general.regexPatterns),
-            providers: providers
-        )
-    }
-
-    private func parseGeneralRules(fromContent content: String) -> (exact: Set<String>, regexPatterns: [String]) {
-        var exact = Set<String>()
-        var regexPatterns: [String] = []
-
-        for rawLine in content.split(whereSeparator: \.isNewline) {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !line.isEmpty, !line.hasPrefix("!"), !line.hasPrefix("#") else { continue }
-            guard line.hasPrefix(removeParamPrefix) else { continue }
-
-            var token = String(line.dropFirst(removeParamPrefix.count))
-            if let commaIndex = token.firstIndex(of: ",") {
-                token = String(token[..<commaIndex])
-            }
-            addToken(token, exact: &exact, regexPatterns: &regexPatterns)
-        }
-
-        return (exact, regexPatterns)
-    }
-
-    private func parseProviderRules(fromData data: Data) -> [ProviderRule] {
-        guard let decoded = try? JSONDecoder().decode(ProviderRoot.self, from: data) else {
-            return []
-        }
-
-        var rules: [ProviderRule] = []
-        for (providerName, provider) in decoded.providers.sorted(by: { $0.key < $1.key }) {
-            guard let urlPattern = provider.urlPattern, !urlPattern.isEmpty else {
-                continue
-            }
-
-            var exact = Set<String>()
-            var regexPatterns: [String] = []
-
-            for token in provider.rules ?? [] {
-                addToken(token, exact: &exact, regexPatterns: &regexPatterns)
-            }
-            for token in provider.referralMarketing ?? [] {
-                addToken(token, exact: &exact, regexPatterns: &regexPatterns)
-            }
-            for token in provider.rawRules ?? [] {
-                addToken(token, exact: &exact, regexPatterns: &regexPatterns)
-            }
-
-            rules.append(
-                ProviderRule(
-                    name: providerName,
-                    urlPattern: compileURLRegex(urlPattern),
-                    exactParams: exact,
-                    regexParams: compileParameterRegexes(regexPatterns)
+        if let bundledData = loadBundledParsedRulesData(),
+           let bundledRules = parseRules(from: bundledData) {
+            saveParsedRulesDataToCache(bundledData)
+            return RefreshResult(
+                rules: bundledRules,
+                status: RuleRefreshStatus(
+                    message: "\(messagePrefix) Using bundled rules.",
+                    usedRemoteTXT: false,
+                    usedRemoteJSON: false,
+                    hadErrors: true
                 )
             )
         }
 
-        return rules
+        let finalMessage = "\(messagePrefix) No fallback rules available."
+        logErrors([finalMessage])
+        return RefreshResult(
+            rules: nil,
+            status: RuleRefreshStatus(
+                message: finalMessage,
+                usedRemoteTXT: false,
+                usedRemoteJSON: false,
+                hadErrors: true
+            )
+        )
     }
 
-    private func addToken(_ rawToken: String, exact: inout Set<String>, regexPatterns: inout [String]) {
-        var token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else { return }
-
-        if token.first == "/", token.last == "/", token.count > 2 {
-            token = String(token.dropFirst().dropLast())
+    private func parseRules(from data: Data) -> URLCleaningRules? {
+        guard let payload = try? JSONDecoder().decode(ParsedRulesPayload.self, from: data) else {
+            return nil
         }
 
-        if token.contains("=") || token.rangeOfCharacter(from: regexMetaCharacters) != nil {
-            regexPatterns.append(token)
-        } else {
-            exact.insert(token.lowercased())
+        let generalExact = Set(payload.generalExact.map { $0.lowercased() })
+        let generalRegex = compileParameterRegexes(payload.generalRegex)
+
+        let providers = payload.providers.compactMap { provider -> ProviderRule? in
+            guard let urlPattern = provider.urlPattern,
+                  !urlPattern.isEmpty,
+                  let compiledURLPattern = compileURLRegex(urlPattern) else {
+                return nil
+            }
+
+            return ProviderRule(
+                name: provider.name,
+                urlPattern: compiledURLPattern,
+                exactParams: Set(provider.exactParams.map { $0.lowercased() }),
+                regexParams: compileParameterRegexes(provider.regexParams)
+            )
         }
+
+        return URLCleaningRules(
+            generalExact: generalExact,
+            generalRegex: generalRegex,
+            providers: providers
+        )
     }
 
     private func compileURLRegex(_ pattern: String) -> CompiledRegex? {
@@ -442,160 +326,81 @@ private final class RulesLoader {
         }
     }
 
-    private func loadCachedRules() -> URLCleaningRules? {
-        let url = parsedRulesCacheURL()
-        guard let data = try? Data(contentsOf: url),
-              let payload = try? JSONDecoder().decode(CachedRulesPayload.self, from: data) else {
-            return nil
+    private func repoParsedRulesURL() -> URL? {
+        let environmentURL = ProcessInfo.processInfo.environment["URLSAFECLIPBOARD_RULES_URL"]
+        if let environmentURL, !environmentURL.isEmpty, let url = URL(string: environmentURL) {
+            return url
         }
 
-        let providers = payload.providers.compactMap { provider -> ProviderRule? in
-            guard let urlPattern = provider.urlPattern else {
-                return nil
+        if let plistURL = Bundle.main.object(forInfoDictionaryKey: "URLSafeClipboardParsedRulesURL") as? String,
+           !plistURL.isEmpty,
+           let url = URL(string: plistURL) {
+            return url
+        }
+
+        return URL(string: defaultRepoURL)
+    }
+
+    private func loadCachedParsedRulesData() -> Data? {
+        try? Data(contentsOf: cacheFileURL())
+    }
+
+    private func loadBundledParsedRulesData() -> Data? {
+        if let resourceURL = Bundle.main.resourceURL {
+            let bundledURL = resourceURL
+                .appendingPathComponent("assets", isDirectory: true)
+                .appendingPathComponent("parsedRules.json")
+            if fileManager.fileExists(atPath: bundledURL.path),
+               let data = try? Data(contentsOf: bundledURL) {
+                return data
             }
-            return ProviderRule(
-                name: provider.name,
-                urlPattern: compileURLRegex(urlPattern),
-                exactParams: Set(provider.exactParams),
-                regexParams: compileParameterRegexes(provider.regexParams)
-            )
-        }
-
-        return URLCleaningRules(
-            generalExact: Set(payload.generalExact),
-            generalRegex: compileParameterRegexes(payload.generalRegex),
-            providers: providers
-        )
-    }
-
-    private func saveRulesToCache(_ rules: URLCleaningRules) {
-        let payload = CachedRulesPayload(
-            generalExact: Array(rules.generalExact).sorted(),
-            generalRegex: rules.generalRegex.map(\.source),
-            providers: rules.providers.map { provider in
-                CachedRulesPayload.ProviderEntry(
-                    name: provider.name,
-                    urlPattern: provider.urlPattern?.source,
-                    exactParams: Array(provider.exactParams).sorted(),
-                    regexParams: provider.regexParams.map(\.source)
-                )
-            }
-        )
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(payload) else { return }
-
-        let url = parsedRulesCacheURL()
-        let directory = url.deletingLastPathComponent()
-        do {
-            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-            try data.write(to: url, options: [.atomic])
-        } catch {
-            // Cache is optional; ignore failures.
-        }
-    }
-
-    private func cachedTXTString() -> String? {
-        try? String(contentsOf: remoteTXTCacheURL(), encoding: .utf8)
-    }
-
-    private func cachedJSONData() -> Data? {
-        try? Data(contentsOf: remoteJSONCacheURL())
-    }
-
-    private func saveRemoteTXTCache(_ value: String) {
-        writeCacheData(Data(value.utf8), to: remoteTXTCacheURL())
-    }
-
-    private func saveRemoteJSONCache(_ value: Data) {
-        writeCacheData(value, to: remoteJSONCacheURL())
-    }
-
-    private func writeCacheData(_ data: Data, to url: URL) {
-        let directory = url.deletingLastPathComponent()
-        do {
-            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-            try data.write(to: url, options: [.atomic])
-        } catch {
-            // Cache is optional; ignore failures.
-        }
-    }
-
-    private func assetTXTString() -> String? {
-        guard let assetURLs = locateAssetFiles() else { return nil }
-        return try? String(contentsOf: assetURLs.generalRulesURL, encoding: .utf8)
-    }
-
-    private func assetJSONData() -> Data? {
-        guard let assetURLs = locateAssetFiles() else { return nil }
-        return try? Data(contentsOf: assetURLs.providerRulesURL)
-    }
-
-    private func locateAssetFiles() -> AssetURLs? {
-        if let resourceURL = Bundle.main.resourceURL,
-           let assets = assetURLs(in: resourceURL.appendingPathComponent("assets", isDirectory: true)) {
-            return assets
         }
 
         let cwd = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
-        if let assets = searchAssetsUpTree(startingFrom: cwd) {
-            return assets
-        }
-
-        if let executableURL = Bundle.main.executableURL?.deletingLastPathComponent(),
-           let assets = searchAssetsUpTree(startingFrom: executableURL) {
-            return assets
-        }
-
-        return nil
-    }
-
-    private func searchAssetsUpTree(startingFrom root: URL) -> AssetURLs? {
-        var current = root
+        var current = cwd
         for _ in 0..<8 {
-            if let assets = assetURLs(in: current.appendingPathComponent("assets", isDirectory: true)) {
-                return assets
+            let candidate = current
+                .appendingPathComponent("assets", isDirectory: true)
+                .appendingPathComponent("parsedRules.json")
+            if fileManager.fileExists(atPath: candidate.path),
+               let data = try? Data(contentsOf: candidate) {
+                return data
             }
+
             let parent = current.deletingLastPathComponent()
             if parent.path == current.path {
                 break
             }
             current = parent
         }
+
         return nil
     }
 
-    private func assetURLs(in assetDirectory: URL) -> AssetURLs? {
-        let txt = assetDirectory.appendingPathComponent("privacy-removeparam.txt")
-        let json = assetDirectory.appendingPathComponent("data.min.json")
-        guard fileManager.fileExists(atPath: txt.path),
-              fileManager.fileExists(atPath: json.path) else {
-            return nil
+    private func saveParsedRulesDataToCache(_ data: Data) {
+        let url = cacheFileURL()
+        let directory = url.deletingLastPathComponent()
+
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try data.write(to: url, options: [.atomic])
+        } catch {
+            // Cache is optional; ignore failures.
         }
-        return AssetURLs(generalRulesURL: txt, providerRulesURL: json)
+    }
+
+    private func cacheFileURL() -> URL {
+        cacheDirectoryURL().appendingPathComponent("parsedRules.json")
+    }
+
+    private func errorLogURL() -> URL {
+        cacheDirectoryURL().appendingPathComponent("error.txt")
     }
 
     private func cacheDirectoryURL() -> URL {
         let base = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         return base.appendingPathComponent("URLSafeClipboard", isDirectory: true)
-    }
-
-    private func parsedRulesCacheURL() -> URL {
-        cacheDirectoryURL().appendingPathComponent("parsedRules.json")
-    }
-
-    private func remoteTXTCacheURL() -> URL {
-        cacheDirectoryURL().appendingPathComponent("privacy-removeparam.txt")
-    }
-
-    private func remoteJSONCacheURL() -> URL {
-        cacheDirectoryURL().appendingPathComponent("data.min.json")
-    }
-
-    private func errorLogURL() -> URL {
-        cacheDirectoryURL().appendingPathComponent("error.txt")
     }
 
     private func logErrors(_ errors: [String]) {
@@ -622,33 +427,4 @@ private final class RulesLoader {
             // Logging is optional; ignore failures.
         }
     }
-}
-
-private struct AssetURLs {
-    let generalRulesURL: URL
-    let providerRulesURL: URL
-}
-
-private struct ProviderRoot: Decodable {
-    let providers: [String: ProviderDefinition]
-}
-
-private struct ProviderDefinition: Decodable {
-    let urlPattern: String?
-    let rules: [String]?
-    let referralMarketing: [String]?
-    let rawRules: [String]?
-}
-
-private struct CachedRulesPayload: Codable {
-    struct ProviderEntry: Codable {
-        let name: String
-        let urlPattern: String?
-        let exactParams: [String]
-        let regexParams: [String]
-    }
-
-    let generalExact: [String]
-    let generalRegex: [String]
-    let providers: [ProviderEntry]
 }
