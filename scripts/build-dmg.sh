@@ -1,46 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="URLSafeClipboard"
+APP_NAME="PurePaste"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 BUILD_BIN="$ROOT_DIR/.build/release/$APP_NAME"
-ICON_PNG="$ROOT_DIR/assets/logo.png"
+PLIST_PATH="$ROOT_DIR/PurePaste-Info.plist"
+ICON_PNG="$ROOT_DIR/assets/icon.png"
+BACKGROUND_PNG="$ROOT_DIR/assets/background.png"
+
 ICONSET_DIR="$DIST_DIR/AppIcon.iconset"
 ICON_ICNS="$DIST_DIR/AppIcon.icns"
-STAGE_DIR="$DIST_DIR/dmg-root"
-TMP_DMG="$DIST_DIR/$APP_NAME.tmp.dmg"
+STAGE_DIR="$DIST_DIR/dmg-stage"
+
 FINAL_DMG="$ROOT_DIR/$APP_NAME.dmg"
-MOUNT_POINT="/Volumes/$APP_NAME"
-BACKGROUND_SRC="$ROOT_DIR/assets/background.tiff"
-GOLDEN_DS_STORE="$ROOT_DIR/assets/golden.DS_Store"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 
 cleanup() {
-  if mount | grep -q "on $MOUNT_POINT "; then
-    hdiutil detach "$MOUNT_POINT" -force || true
-  fi
   rm -rf "$STAGE_DIR" "$ICONSET_DIR"
-  rm -f "$TMP_DMG" "$ICON_ICNS"
+  rm -f "$ICON_ICNS"
+  rm -f "$ROOT_DIR"/rw.*."$APP_NAME".dmg
 }
 
 trap cleanup EXIT
 
+if ! command -v create-dmg >/dev/null 2>&1; then
+  echo "Error: create-dmg is not installed or not in PATH."
+  exit 1
+fi
+
+if [[ ! -f "$PLIST_PATH" ]]; then
+  echo "Error: missing plist at $PLIST_PATH"
+  exit 1
+fi
+
+if [[ ! -f "$BACKGROUND_PNG" ]]; then
+  echo "Error: missing DMG background at $BACKGROUND_PNG"
+  exit 1
+fi
+
 mkdir -p "$DIST_DIR"
 
-echo "Building app binary..."
+echo "Building $APP_NAME..."
 swift build -c release --package-path "$ROOT_DIR" --product "$APP_NAME"
 
 echo "Assembling app bundle..."
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BUILD_BIN" "$APP_DIR/Contents/MacOS/$APP_NAME"
-cp "$ROOT_DIR/URLSafeClipboard-Info.plist" "$APP_DIR/Contents/Info.plist"
+cp "$PLIST_PATH" "$APP_DIR/Contents/Info.plist"
 cp -R "$ROOT_DIR/assets" "$APP_DIR/Contents/Resources/assets"
 
 if [[ -f "$ICON_PNG" ]]; then
-  echo "Generating app icon from assets/logo.png..."
   mkdir -p "$ICONSET_DIR"
   sips -z 16 16 "$ICON_PNG" --out "$ICONSET_DIR/icon_16x16.png"
   sips -z 32 32 "$ICON_PNG" --out "$ICONSET_DIR/icon_16x16@2x.png"
@@ -57,70 +69,51 @@ if [[ -f "$ICON_PNG" ]]; then
 fi
 
 if [[ -n "$SIGN_IDENTITY" ]]; then
-  echo "Signing app bundle with identity: $SIGN_IDENTITY"
+  echo "Signing app with $SIGN_IDENTITY"
   codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DIR"
 fi
 
-echo "Preparing DMG staging directory..."
+echo "Creating DMG staging folder..."
 rm -rf "$STAGE_DIR"
-mkdir -p "$STAGE_DIR/.background"
+mkdir -p "$STAGE_DIR"
 cp -R "$APP_DIR" "$STAGE_DIR/"
-ln -s /Applications "$STAGE_DIR/Applications"
 
-if [[ -f "$BACKGROUND_SRC" ]]; then
-  cp "$BACKGROUND_SRC" "$STAGE_DIR/.background/background.tiff"
-fi
+rm -f "$FINAL_DMG"
 
-if [[ -f "$GOLDEN_DS_STORE" ]]; then
-  cp "$GOLDEN_DS_STORE" "$STAGE_DIR/.DS_Store"
-else
-  touch "$STAGE_DIR/.DS_Store"
-fi
-
-echo "Creating writable DMG..."
-rm -f "$TMP_DMG" "$FINAL_DMG"
-hdiutil create -srcfolder "$STAGE_DIR" -volname "$APP_NAME" -fs HFS+ -format UDRW "$TMP_DMG"
-
-echo "Applying Finder layout and background..."
-hdiutil attach "$TMP_DMG" -mountpoint "$MOUNT_POINT" -noverify -noautoopen
+echo "Creating polished DMG via create-dmg..."
 set +e
-osascript <<EOF
-tell application "Finder"
-  tell disk "$APP_NAME"
-    open
-    set current view of container window to icon view
-    set toolbar visible of container window to false
-    set statusbar visible of container window to false
-    set bounds of container window to {120, 120, 860, 540}
-    tell icon view options of container window
-      set arrangement to not arranged
-      set icon size to 128
-      set background picture to file ".background:background.tiff"
-    end tell
-    set position of item "$APP_NAME.app" to {190, 250}
-    set position of item "Applications" to {530, 250}
-    update without registering applications
-    delay 1
-    close
-  end tell
-end tell
-EOF
-APPLE_SCRIPT_EXIT=$?
+
+
+ICON_SIZE=128
+WINDOW_WIDTH=800
+WINDOW_HEIGHT=485
+
+THIRD=$(( WINDOW_WIDTH / 3 ))
+CENTER_X=$(( WINDOW_WIDTH / 2 - ICON_SIZE / 2 ))
+CENTER_Y=$(( WINDOW_HEIGHT / 2 + ICON_SIZE / 2 ))
+ICON_X=$(( CENTER_X - THIRD / 2 - ICON_SIZE / 2 ))
+ICON_Y=$(( CENTER_Y - ICON_SIZE / 2 ))
+APP_DROP_X=$(( CENTER_X + THIRD  + ICON_SIZE / 2 ))
+APP_DROP_Y=$ICON_Y
+
+create-dmg \
+  --volname "$APP_NAME" \
+  --window-size $WINDOW_WIDTH $WINDOW_HEIGHT \
+  --icon-size $ICON_SIZE \
+  --icon "$APP_NAME.app" $ICON_X $ICON_Y \
+  --hide-extension "$APP_NAME.app" \
+  --app-drop-link $APP_DROP_X $APP_DROP_Y \
+  --background "$BACKGROUND_PNG" \
+  --format UDZO \
+  --no-internet-enable \
+  "$FINAL_DMG" \
+  "$STAGE_DIR"
+
+create_dmg_exit=$?
 set -e
 
-if [[ $APPLE_SCRIPT_EXIT -ne 0 ]]; then
-  echo "Warning: Finder AppleScript layout step failed (likely Automation permission). Continuing with DMG build."
-fi
-
-echo "Syncing and detaching volume..."
-sync
-hdiutil detach "$MOUNT_POINT"
-
-echo "Converting to compressed read-only DMG..."
-hdiutil convert "$TMP_DMG" -format UDZO -o "$FINAL_DMG"
-
 if [[ -n "$SIGN_IDENTITY" ]]; then
-  echo "Signing DMG with identity: $SIGN_IDENTITY"
+  echo "Signing DMG with $SIGN_IDENTITY"
   codesign --force --sign "$SIGN_IDENTITY" "$FINAL_DMG"
 fi
 

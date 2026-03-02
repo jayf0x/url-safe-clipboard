@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 
 @MainActor
@@ -9,14 +10,30 @@ final class AppState: ObservableObject {
 
     private let cleaner: URLCleaner
     private let watcher: ClipboardWatcher
+    private var terminationObserver: NSObjectProtocol?
 
     init() {
         cleaner = URLCleaner()
         watcher = ClipboardWatcher(cleaner: cleaner)
         watcher.start()
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.watcher.stop()
+            }
+        }
 
         Task { [weak self] in
             await self?.refreshRulesOnLaunchIfNeeded()
+        }
+    }
+
+    deinit {
+        if let terminationObserver {
+            NotificationCenter.default.removeObserver(terminationObserver)
         }
     }
 

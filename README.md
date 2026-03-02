@@ -1,94 +1,51 @@
-# URLSafeClipboard
+# PurePaste
 
-URLSafeClipboard is a macOS menu bar app (Swift/SwiftUI) that neutralizes tracking parameters in copied URLs.
+PurePaste is a tiny macOS menu bar app that tries to clean tracking junk from links you copy.
 
-Privacy model:
-- Clipboard content is never written to disk.
-- Duplicate detection uses an in-memory SHA-256 hash only.
-- Only rule files are cached.
+It is practical, not perfect. Some links clean nicely, some do not, and a few sites may still behave oddly.
 
-## Rule Model
+## Install in 3 steps
 
-The app now consumes a single parsed file:
-- `assets/parsedRules.json`
+1. Build the installer:
+   ```bash
+   ./scripts/build-dmg.sh
+   ```
+2. Open `./PurePaste.dmg`.
+3. Drag `PurePaste.app` to `Applications`.
 
-Schema:
-- `generalExact`: global exact query-parameter names
-- `generalRegex`: global regex query-parameter patterns
-- `providers[]`:
-  - `name`
-  - `urlPattern` (regex to match URL)
-  - `exactParams`
-  - `regexParams`
+That is it.
 
-## Update Flow
+## Daily use
 
-### 1. Generate Parsed Rules (`./create-rules`)
+- Click the menu bar icon to open the menu.
+- `Pause` stops all clipboard polling.
+- `Activate` starts it again.
+- `Replace params` changes tracking values to `null` instead of removing them.
+- `Refetch rules` reloads the latest rules file from the repo.
 
-`./create-rules` fetches upstream rule sources and writes `assets/parsedRules.json`.
+## Create a release (maintainers)
 
-Upstream sources:
-- TXT: `https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/privacy-removeparam.txt`
-- JSON: `https://gitlab.com/ClearURLs/rules/-/raw/master/data.min.json`
+1. Update the `VERSION` value in `./scripts/release.sh`.
+2. Make sure you are logged into GitHub CLI:
+   ```bash
+   gh auth login
+   ```
+3. Run:
+   ```bash
+   ./scripts/release.sh
+   ```
 
-Usage:
+This script builds `PurePaste.dmg`, tags `vX.Y.Z`, and creates a GitHub release with generated notes.
 
-```bash
-./create-rules
-```
+## For nerds
 
-Offline/local fallback generation:
-
-```bash
-./create-rules --offline
-```
-
-### 2. App Startup Loading
-
-At startup, app rule loading order is:
-1. `~/Library/Caches/URLSafeClipboard/parsedRules.json`
-2. Bundled `assets/parsedRules.json`
-
-If cache is missing, startup triggers an async repo refetch attempt.
-
-### 3. Refetch Rules
-
-Menu action: `Refetch rules`
-- Fetches only one file from your repo (`parsedRules.json`)
-- Updates in-memory rules and cache on success
-- Falls back to cache/bundled rules on failure
-
-Configure repo URL via:
-- Info.plist key: `URLSafeClipboardParsedRulesURL`
-- Or env override: `URLSAFECLIPBOARD_RULES_URL`
-
-## Build DMG Installer
-
-```bash
-./scripts/build-dmg.sh
-```
-
-Output:
-- `./URLSafeClipboard.dmg`
-
-Installer behavior:
-- Drag-and-drop layout (`URLSafeClipboard.app` + `Applications` link)
-- Includes background image from `assets/background.tiff`
-- Builds app + DMG in one script
-
-Optional signing identity:
-
-```bash
-SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/build-dmg.sh
-```
-
-## Run In Development
-
-```bash
-swift run URLSafeClipboard
-```
-
-## Cache Files
-
-- Rules cache: `~/Library/Caches/URLSafeClipboard/parsedRules.json`
-- Optional error log: `~/Library/Caches/URLSafeClipboard/error.txt`
+- App source lives in `./source`.
+- Rules are loaded from `assets/parsedRules.json` and cached at:
+  - `~/Library/Caches/PurePaste/parsedRules.json`
+- One-time migration is supported from the old cache path:
+  - `~/Library/Caches/URLSafeClipboard/parsedRules.json`
+- Rules URL override:
+  - env: `PUREPASTE_RULES_URL`
+  - plist key: `PurePasteParsedRulesURL`
+- Build command used by script:
+  - `swift build -c release --product PurePaste`

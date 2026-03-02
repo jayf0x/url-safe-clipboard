@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @main
-struct URLSafeClipboardApp: App {
+struct PurePasteApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var appState = AppState()
 
@@ -53,8 +53,8 @@ struct URLSafeClipboardApp: App {
 
     private var iconName: String {
         if !appState.isActive {
-            return "pause.circle.fill"
+            return "pause.circle"
         }
-        return "link.circle.fill"
+        return "lock.shield"
     }
 }

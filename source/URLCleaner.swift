@@ -203,21 +203,19 @@ private final class RulesLoader {
     func refreshRulesFromRepo() async -> RefreshResult {
         guard let repoURL = repoParsedRulesURL() else {
             let message = "Refetch failed: missing repo parsedRules URL."
-            logErrors([message])
             return refreshFromFallback(messagePrefix: message)
         }
 
         do {
-            let (data, response) = try await URLSession.shared.data(from: repoURL)
+            let request = URLRequest(url: repoURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 12)
+            let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                 let message = "Refetch failed: repo returned non-2xx response."
-                logErrors([message])
                 return refreshFromFallback(messagePrefix: message)
             }
 
             guard let parsed = parseRules(from: data) else {
                 let message = "Refetch failed: invalid parsedRules.json format from repo."
-                logErrors([message])
                 return refreshFromFallback(messagePrefix: message)
             }
 
@@ -233,7 +231,6 @@ private final class RulesLoader {
             )
         } catch {
             let message = "Refetch failed: \(error.localizedDescription)"
-            logErrors([message])
             return refreshFromFallback(messagePrefix: message)
         }
     }
@@ -267,7 +264,6 @@ private final class RulesLoader {
         }
 
         let finalMessage = "\(messagePrefix) No fallback rules available."
-        logErrors([finalMessage])
         return RefreshResult(
             rules: nil,
             status: RuleRefreshStatus(
@@ -327,12 +323,12 @@ private final class RulesLoader {
     }
 
     private func repoParsedRulesURL() -> URL? {
-        let environmentURL = ProcessInfo.processInfo.environment["URLSAFECLIPBOARD_RULES_URL"]
+        let environmentURL = ProcessInfo.processInfo.environment["PUREPASTE_RULES_URL"]
         if let environmentURL, !environmentURL.isEmpty, let url = URL(string: environmentURL) {
             return url
         }
 
-        if let plistURL = Bundle.main.object(forInfoDictionaryKey: "URLSafeClipboardParsedRulesURL") as? String,
+        if let plistURL = Bundle.main.object(forInfoDictionaryKey: "PurePasteParsedRulesURL") as? String,
            !plistURL.isEmpty,
            let url = URL(string: plistURL) {
             return url
@@ -393,38 +389,29 @@ private final class RulesLoader {
         cacheDirectoryURL().appendingPathComponent("parsedRules.json")
     }
 
-    private func errorLogURL() -> URL {
-        cacheDirectoryURL().appendingPathComponent("error.txt")
-    }
-
     private func cacheDirectoryURL() -> URL {
         let base = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        return base.appendingPathComponent("URLSafeClipboard", isDirectory: true)
+        let purePaste = base.appendingPathComponent("PurePaste", isDirectory: true)
+        let legacy = base.appendingPathComponent("URLSafeClipboard", isDirectory: true)
+        migrateLegacyCache(from: legacy, to: purePaste)
+        return purePaste
     }
 
-    private func logErrors(_ errors: [String]) {
-        guard !errors.isEmpty else { return }
-
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        let body = errors.map { "\(timestamp) \($0)" }.joined(separator: "\n") + "\n"
-        let data = Data(body.utf8)
-
-        let url = errorLogURL()
-        let directory = url.deletingLastPathComponent()
+    private func migrateLegacyCache(from oldDir: URL, to newDir: URL) {
+        guard fileManager.fileExists(atPath: oldDir.path) else { return }
+        guard !fileManager.fileExists(atPath: newDir.path) else { return }
 
         do {
-            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-            if fileManager.fileExists(atPath: url.path),
-               let handle = try? FileHandle(forWritingTo: url) {
-                try handle.seekToEnd()
-                try handle.write(contentsOf: data)
-                try handle.close()
-            } else {
-                try data.write(to: url, options: [.atomic])
+            try fileManager.createDirectory(at: newDir, withIntermediateDirectories: true)
+            let oldParsed = oldDir.appendingPathComponent("parsedRules.json")
+            let newParsed = newDir.appendingPathComponent("parsedRules.json")
+            if fileManager.fileExists(atPath: oldParsed.path),
+               !fileManager.fileExists(atPath: newParsed.path) {
+                try fileManager.copyItem(at: oldParsed, to: newParsed)
             }
         } catch {
-            // Logging is optional; ignore failures.
+            // Migration is opportunistic.
         }
     }
 }

@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "URLSafeClipboard",
+    name: "PurePaste",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "URLSafeClipboard", targets: ["URLSafeClipboard"])
+        .executable(name: "PurePaste", targets: ["PurePaste"])
     ],
     targets: [
         .executableTarget(
-            name: "URLSafeClipboard",
-            path: "Sources/URLSafeClipboard"
+            name: "PurePaste",
+            path: "source"
         )
     ]
 )
